@@ -7,7 +7,5 @@ dumper = DataDumper(
 )
 
 dumper.dump_symbols(
-    data_type="klines",
-    start_date=datetime.date(2023, 1, 1),
-    freq="1m",
+    data_type="fundingrate",
 )
