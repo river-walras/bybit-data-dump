@@ -9,3 +9,5 @@ dumper = DataDumper(
 dumper.dump_symbols(
     data_type="fundingrate",
 )
+
+

@@ -12,6 +12,7 @@ import aiohttp.http_exceptions
 import logging
 from urllib.parse import urlparse
 from fake_headers import Headers
+from curl_cffi import requests as cfreq
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,12 +89,15 @@ class DataDumper:
         self._chunk_size = chunk_size
         self._proxy = proxy
         self._headers = {
+            "authority": "www.bybit.com",
+            "method": "GET",
+            "scheme": "https",
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-            "cache-control": "no-cache",
-            "pragma": "no-cache",
+            "accept-encoding": "gzip, deflate, br, zstd",
             "priority": "u=0, i",
-            "sec-ch-ua": '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            "cookie": '_by_l_g_d=aa0e7125-7e34-64e3-ab46-564d6c1bcfc7; deviceId=10d8c616-6fd0-ac1b-c2b3-979cadd2e845; cookies_uuid_report=11679560-f1b9-4aee-b9a4-3ef021093777; first_collect=true; _gcl_au=1.1.126852506.1758727699; _by_l_g_d=aa0e7125-7e34-64e3-ab46-564d6c1bcfc7; by_token_print=4b8fda7e03m0z3l7n4mszhe2d7d1d8047; deviceCodeExpire=1758734661352; secure-token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0NjM3OTQzOTgsImIiOjAsInAiOjMsInVhIjoiIiwiZ2VuX3RzIjoxNzU4NzM0NjgyLCJleHAiOjE3NTg5OTM4ODIsIm5zIjoiIiwiZXh0Ijp7Im1jdCI6IjE3NDY3ODg2NDAiLCJwaWQiOiI0NjM3MzI0MzYiLCJzaWQiOiJCWUJJVCIsInNpdGUtaWQiOiJCWUJJVCIsInR5cCI6Ik1FTUJFUl9SRUxBVElPTl9UWVBFX09XTiJ9LCJkIjpmYWxzZSwic2lkIjoiQllCSVQifQ.GnFLqF6KvxwDpRdyK6_nX4wQPHkKDK1t8ky7W9AQjsJeb3Y3ld6H1UER2U0Da94AuWvBNcw4rJnAkRNULJJ_Jg; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%22463794398%22%2C%22first_id%22%3A%221997b082d251178-096121ec31b9a08-1f525631-3686400-1997b082d26349a%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E7%9B%B4%E6%8E%A5%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC_%E7%9B%B4%E6%8E%A5%E6%89%93%E5%BC%80%22%2C%22%24latest_referrer%22%3A%22%22%2C%22_a_u_v%22%3A%220.0.6%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTk5N2IwODJkMjUxMTc4LTA5NjEyMWVjMzFiOWEwOC0xZjUyNTYzMS0zNjg2NDAwLTE5OTdiMDgyZDI2MzQ5YSIsIiRpZGVudGl0eV9sb2dpbl9pZCI6IjQ2Mzc5NDM5OCJ9%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%24identity_login_id%22%2C%22value%22%3A%22463794398%22%7D%7D; BYBIT_REG_REF_prod={"lang":"en-US","g":"aa0e7125-7e34-64e3-ab46-564d6c1bcfc7","referrer":"www.bybit.com/","source":"bybit.com","medium":"other","url":"https://www.bybit.com/en/","last_refresh_time":"Fri, 26 Sep 2025 09:20:24 GMT","ext_json":{"dtpid":null}}; tx_token_current=BNE; tx_token_time=1758878428394; trace_id_time=1758878428418; _abck=9B7A266F0CC6190038BADB4F231DACD9~0~YAAQxnw2F+soN1OZAQAAqhEXiQ67pxXOCCVEZdYJchN5RUpKOd3EOLNk0S7jeqGsd9pQc5C7d3HyG4odjLFkCpqihpnId8JCWg8Nd6YlN0Lyy402LQKH418ENazLcyUyX8dlrDAF0CyZhiGHH2iXBVFnWIy19clKz+/Ge7cap9p3HXysGS5eTgJV5abR1/y0Z5Xlj67UD75VzZ0hTMO8qeI77OS/sok/uT7Ch1t3OX80LhzChb0aEmC3OTbubbyeVZs5x1h0Q06D4L/MSAZ2fT/4tRtkS9AFbDhfIRkyBeoJ/Tv4fbD5hrIRUu1c/NZTO3n5HjE6KgT3+SZyqIwurgco9Xe/4LzctR56b8GJH19Kz2uhTEoIF4xOVApt7YqPC6iiAkiIKhbJDhl+Fm+IKC1oWAsrc6UP1w1awZvXJ8GXHXVzUofTM4YzehCf4AaBolq7OlOpaFN8vwa6yva2pSggl3+3tI7+nulcw37p2yG+U4mQG3vlEj5Q9a4VNIZuioCA42Q+JqpFseq4b7v+bx8dK01GX8QldB4B3rpayaDNDafYZp+VanOUKY8dv/DqJuR5nHwvb65t/AjHgELCy8eAOxE0SkVkDxjcd8PWBOAWWlNsocpTsuHUAV1aLe+6Lbo=~-1~-1~-1~AAQAAAAE%2f%2f%2f%2f%2f43iDZhB2UJo6cYyqLeYPskziP+VZ86ZBZEyYMHvjlIG2dhWNEpVFbBJrMgC6GMn383TLia7HVuSnbLCmE5Eb3jbzHiRVmVD7hPw~-1; ak_bmsc=9F3561885BCF25AF16B785E63C837746~000000000000000000000000000000~YAAQxnw2F+woN1OZAQAAqhEXiR3lX3nQzVVDvrmxBJe+4CrLj4b9WTTo9qohqRoKNg68B//e82Rlh81MoJ9/kFJ4px0Yuf0grZWZYcrTNZrrKxbOYdwPwSe2zx5pSTyptwg+svXib6SYsMl7fhJUCm2Wjk9m6ww56yqhcdUEDC5hKCOTByUCUSoH2c5Fz60jR6YqyZO8JJ0lQC4isqRWcdVWH+DUo4tbNMQxRyXvCDQbdhH8OMZ3hwQ4ht5y2CyOpCJyNXmrrEV9PWxXHHnk4cLT6aOpRKyqXool6YKFx4ax3OAJBSS39ESRFeimQxqEK6ZuWx9nQo/jIOUqouhCVigaZD40tDnUs/D6DJd78EPgnJMdWBUBu0Ej//KM9q1mXVmNsPNa4CzpoVF6; bm_sz=C6F01C6FE9F54F11ACD061D84FF026FD~YAAQxnw2F+e4OVOZAQAA1UooiR3djRRgmiQFN617hGhjIHxuj3U/c8o4TSOueV4MIuKhlTthIqiX2r/ii6Rd4TC/KaRMmE584CKmJ5rPNrYy2CuxGgLw3h/MgE+k77oura+US2f8buMM2oklx4Y6Jblc+1vPCTOvmUx5+1aGSfSFUvCxgSS66kAeuDCjtpVgdPNx5HSVb0rDgxIwgQZZMR/V2VOJJmXJwPRb8AysX2tLi0+arcYMXH5vd9uVUM+dLa93Tv3mPV9AnV+MsrLFvmXRxi2MOClu33s93EhN2oOM1AnWih1iBhvOUyXwk2AMVLt+sZ5xZkvMR9iH7uACpUNnYjbnIoQiylEhq7oPjY/iWKo9xWB5qJ3x/DuUrUsv/fmOz2hLMeXTGKl6TInAFtxZ346W81B7sc2mhw3oPM5cV6PLqA==~3747906~4404279; bm_sv=95B6895C03FD7E8504F7359D8D4BBE2B~YAAQxnw2F3LAOVOZAQAAd30oiR1PkNkYx02IgXJLvyNSxoMcjLhf85TozF3sVeUxP3Oo6hRk0huMB004aplN3CvetJSGQesbXTvPQ1t4YGIkJuJc7Su9CfLUFTHXApuK/qcLmlhN2mI6wJ7rB9hYhbVOAgiNIwrcz1kcEZwAKM+azwBCqogltf3gtulfIprnGsintg28ssIfhtPoJYemeBoype6wULX4raSeiMCa/Acxud8P3Ga+aGTA5h5ICGY=~1',
+            "sec-ch-ua": '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
             "sec-fetch-dest": "document",
@@ -101,7 +105,7 @@ class DataDumper:
             "sec-fetch-site": "none",
             "sec-fetch-user": "?1",
             "upgrade-insecure-requests": "1",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         }
         # haader = Headers(
         #     browser="chrome",
@@ -440,28 +444,24 @@ class DataDumper:
                 os.remove(zip_path)
         return parquet_path
 
-    async def _get_download_url(self, symbol: str) -> str:
+    def _get_download_url(self, symbol: str) -> str:
         """
         https://www.bybit.com/x-api/contract/v5/support/funding-rate-list-export?symbol=ETHUSDT
         https://www.bybit.com/x-api/contract/v5/support/funding-rate-list-export?symbol=BTCUSDT
         """
-        params = {
-            "symbol": symbol,
-        }
+        response = cfreq.get(
+            "https://www.bybit.com/x-api/contract/v5/support/funding-rate-list-export",
+            params={"symbol": symbol},
+            impersonate="chrome"
+        )
+        
+        response.raise_for_status()
+        data = response.json()
 
-        async with aiohttp.ClientSession(trust_env=True, proxy=self._proxy) as session:
-            async with session.get(
-                "https://www.bybit.com/x-api/contract/v5/support/funding-rate-list-export",
-                params=params,
-                headers=self._headers,
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-
-                if not data.get("ret_code") == 0:
-                    raise ValueError(f"Error fetching data for {symbol}: {data.get('ret_msg')}")
+        if not data.get("ret_code") == 0:
+            raise ValueError(f"Error fetching data for {symbol}: {data.get('ret_msg')}")
                 
-                return data["result"]["downloadUrl"]
+        return data["result"]["downloadUrl"]
 
     async def _download_from_s3_url(self, s3_url: str) -> str:
         """
@@ -545,7 +545,7 @@ class DataDumper:
         """
         Download funding rate data for a specific symbol.
         """
-        url = await self._get_download_url(symbol)
+        url = self._get_download_url(symbol)
         await self._download_from_s3_url(url)
 
         
