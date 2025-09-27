@@ -1,5 +1,5 @@
-from typing import Literal, Optional
-import datetime
+from typing import Literal
+from datetime import datetime, timedelta, timezone
 import tenacity
 import pandas as pd
 from tqdm.asyncio import tqdm
@@ -10,9 +10,25 @@ import aiohttp.client_exceptions
 import aiohttp.web_exceptions
 import aiohttp.http_exceptions
 import logging
+from throttled import Throttled, rate_limiter
 from urllib.parse import urlparse
-from fake_headers import Headers
 from curl_cffi import requests as cfreq
+
+FREQ_TYPE = Literal[
+    "1m",
+    "5m",
+    "15m",
+    "30m",
+    "60m",
+    "2h",
+    "4h",
+    "6h",
+    "12h",
+    "1d",
+    "1w",
+    "1M",
+]
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,11 +58,30 @@ class DataDumper:
         ],
         "contract": ["USD", "USDT", "USDC", "FUTURE"],
     }
+    _throttle = {
+        "public": Throttled(
+            quota=rate_limiter.per_duration(timedelta(seconds=5), limit=600), timeout=5
+        ),
+    }
+    _freq_map = {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "60m": "60",
+        "2h": "120",
+        "4h": "240",
+        "6h": "360",
+        "12h": "720",
+        "1d": "D",
+        "1w": "W",
+        "1M": "M",
+    }
 
     @staticmethod
     def _get_date_range(
-        start_date: datetime.date,
-        end_date: datetime.date,
+        start_date: datetime,
+        end_date: datetime,
         circle: Literal["daily", "monthly"] = "daily",
     ):
         if start_date > end_date:
@@ -58,18 +93,18 @@ class DataDumper:
         if circle == "monthly":
             while current <= end_date:
                 # Get the first day of the current month
-                first_day = datetime.date(current.year, current.month, 1)
+                first_day = datetime(current.year, current.month, 1)
                 dates.append(first_day)
 
                 # Move to the first day of next month
                 if current.month == 12:
-                    current = datetime.date(current.year + 1, 1, 1)
+                    current = datetime(current.year + 1, 1, 1)
                 else:
-                    current = datetime.date(current.year, current.month + 1, 1)
+                    current = datetime(current.year, current.month + 1, 1)
         elif circle == "daily":
             while current <= end_date:
                 dates.append(current)
-                current = current + datetime.timedelta(days=1)
+                current = current + timedelta(days=1)
 
         return dates
 
@@ -77,8 +112,8 @@ class DataDumper:
         self,
         asset_type: Literal["spot", "contract"],
         symbols: list[str] | None = None,
-        start_date: datetime.date | None = None,
-        end_date: datetime.date | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         save_dir: str | None = None,
         quote_currency: str | None = None,
         chunk_size: int = 1024 * 16,
@@ -113,15 +148,13 @@ class DataDumper:
         #     headers=True,
         # )
         # self._headers = haader.generate()
+        start_date = start_date.replace(tzinfo=timezone.utc) if start_date else None
+        end_date = end_date.replace(tzinfo=timezone.utc) if end_date else None
 
-        now = (
-            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        ).date()
+        now = datetime.now(timezone.utc) - timedelta(days=1)
 
         if start_date is None:
-            start_date = datetime.datetime(
-                2020, 12, 18, 0, 0, 0, tzinfo=datetime.timezone.utc
-            ).date()
+            start_date = datetime(2020, 12, 18, 0, 0, 0, tzinfo=timezone.utc)
         if end_date is None or end_date > now:
             end_date = now
         if start_date > end_date:
@@ -145,16 +178,16 @@ class DataDumper:
             self.save_dir = os.path.join(save_dir, asset_type)
         os.makedirs(self.save_dir, exist_ok=True)
 
-    async def _get_exchange_info(
+    def _get_exchange_info(
         self,
         asset_type: Literal["spot", "contract"],
     ):
         exchange_map = {"spot": "bybit-spot", "contract": "bybit"}
-        async with aiohttp.ClientSession(trust_env=True, proxy=self._proxy) as session:
-            async with session.get(
+        with cfreq.Session(trust_env=True, proxy=self._proxy) as session:
+            response = session.get(
                 f"https://api.tardis.dev/v1/exchanges/{exchange_map[asset_type]}"
-            ) as response:
-                return await response.json()
+            )
+            return response.json()
 
     def get_exchange_info(
         self,
@@ -171,16 +204,10 @@ class DataDumper:
         if self._info[asset_type]:
             return self._info[asset_type]
 
-        start = datetime.datetime(
-            2020, 12, 18, 0, 0, 0, tzinfo=datetime.timezone.utc
-        ).date()
-        end = (
-            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        ).date()
+        start = datetime(2020, 12, 18, 0, 0, 0, tzinfo=timezone.utc)
+        end = datetime.now(timezone.utc) - timedelta(days=1)
 
-        data = self._loop.run_until_complete(
-            self._get_exchange_info(asset_type=asset_type)
-        )
+        data = self._get_exchange_info(asset_type=asset_type)
 
         info = {}
 
@@ -192,21 +219,13 @@ class DataDumper:
             _type = symbol["type"]
 
             # 将ISO格式的日期字符串转换为datetime对象
-            available_since = (
-                datetime.datetime.strptime(
-                    symbol["availableSince"].split(".")[0], "%Y-%m-%dT%H:%M:%S"
-                )
-                .replace(tzinfo=datetime.timezone.utc)
-                .date()
-            )
+            available_since = datetime.strptime(
+                symbol["availableSince"].split(".")[0], "%Y-%m-%dT%H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
 
-            available_to = (
-                datetime.datetime.strptime(
-                    symbol["availableTo"].split(".")[0], "%Y-%m-%dT%H:%M:%S"
-                )
-                .replace(tzinfo=datetime.timezone.utc)
-                .date()
-            )
+            available_to = datetime.strptime(
+                symbol["availableTo"].split(".")[0], "%Y-%m-%dT%H:%M:%S"
+            ).replace(tzinfo=timezone.utc)
 
             if available_since < start:
                 available_since = start
@@ -269,7 +288,7 @@ class DataDumper:
     def _generate_kline_for_metatrader4_url(
         self,
         symbol: str,
-        date: datetime.date,
+        date: datetime,
         freq: Literal["1m", "5m", "15m", "30m", "60m"],
     ):
         if freq not in ["1m", "5m", "15m", "30m", "60m"]:
@@ -285,16 +304,12 @@ class DataDumper:
             "60m": "60",
         }
 
-        start_of_month = datetime.date(date.year, date.month, 1)
+        start_of_month = datetime(date.year, date.month, 1)
 
         if date.month == 12:
-            end_of_month = datetime.date(date.year + 1, 1, 1) - datetime.timedelta(
-                days=1
-            )
+            end_of_month = datetime(date.year + 1, 1, 1) - timedelta(days=1)
         else:
-            end_of_month = datetime.date(
-                date.year, date.month + 1, 1
-            ) - datetime.timedelta(days=1)
+            end_of_month = datetime(date.year, date.month + 1, 1) - timedelta(days=1)
 
         base_url = (
             f"https://public.bybit.com/kline_for_metatrader4/{symbol}/{date.year}"
@@ -320,7 +335,7 @@ class DataDumper:
         self,
         symbol: str,
         data_type: Literal["klines", "trades"],
-        date: datetime.date,
+        date: datetime,
         asset_type: Literal["spot", "contract"] | None = None,
         freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
     ):
@@ -355,11 +370,129 @@ class DataDumper:
     #     stop=tenacity.stop_after_attempt(5),
     #     wait=tenacity.wait_exponential(exp_base=2, multiplier=4, max=64),
     # )
+    async def _get_v5_market_kline(
+        self,
+        category: str,
+        symbol: str,
+        interval: str,
+        start: int,
+        end: int,
+        limit: int,
+    ):
+        url = "https://api.bybit.com/v5/market/kline"
+        payload = {
+            "category": category,
+            "symbol": symbol,
+            "interval": interval,
+            "start": start,
+            "end": end,
+            "limit": limit,
+        }
+        async with aiohttp.ClientSession(trust_env=True, proxy=self._proxy) as session:
+            self._throttle["public"].limit(key="v5/market/kline")
+            async with session.get(
+                url, params=payload, headers=self._headers
+            ) as response:
+                try:
+                    response.raise_for_status()
+                except aiohttp.client_exceptions.ClientResponseError as e:
+                    if e.status in [500, 502, 503, 504, 429, 408]:
+                        raise tenacity.TryAgain
+                    else:
+                        raise e
+                data = await response.json()
+                return data
+
+    def _get_category(self, symbol: str) -> str:
+        if self.asset_type == "spot":
+            return "spot"
+
+        if symbol.endswith("USDT") or symbol.endswith("USDC"):
+            return "linear"
+        elif symbol.endswith("USD"):
+            return "inverse"
+        else:
+            raise ValueError(f"Symbol {symbol} formated wrongly, or not supported")
+
+    async def _request_klines(
+        self,
+        symbol: str,
+        freq: FREQ_TYPE,
+        start_time: datetime,
+        end_time: datetime,
+    ):
+        start_time = int(start_time.timestamp() * 1000)
+        end_time = int(end_time.timestamp() * 1000)
+
+        category = self._get_category(symbol)
+        all_klines = []
+        seen_timestamps: set[int] = set()
+        prev_start_time: int | None = None
+
+        interval = self._freq_map[freq]
+
+        while True:
+            # Check for infinite loop condition
+            if prev_start_time is not None and prev_start_time == start_time:
+                break
+            prev_start_time = start_time
+
+            klines_response = await self._get_v5_market_kline(
+                category=category,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start=start_time,
+                end=end_time,
+            )
+
+            # Sort klines by start time and filter out duplicates
+            klines = sorted(
+                klines_response["result"]["list"], key=lambda k: int(k["startTime"])
+            )
+            all_klines.extend(klines)
+            seen_timestamps.update(int(kline["startTime"]) for kline in klines)
+
+            # If no new klines were found, break
+            if not klines:
+                break
+
+            # Update the start_time to fetch the next set of bars
+            start_time = int(klines[-1]["startTime"]) + 1
+
+            # No more bars to fetch if we've reached the end time
+            if end_time is not None and start_time >= end_time:
+                break
+
+        df = pd.DataFrame(
+            all_klines,
+            columns=["startTime", "open", "high", "low", "close", "volume", "turnover"],
+        )
+        df["symbol"] = symbol
+        df["timestamp"] = pd.to_datetime(df["startTime"], unit="ms", utc=True)
+
+        return df[
+            [
+                "symbol",
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "turnover",
+            ]
+        ]
+
+    # @tenacity.retry(
+    #     stop=tenacity.stop_after_attempt(5),
+    #     wait=tenacity.wait_exponential(exp_base=2, multiplier=4, max=64),
+    # )
     async def _async_download_symbol_data(
         self,
         symbol: str,
         data_type: Literal["klines", "trades", "fundingrate"],
-        date: datetime.date,
+        date: datetime,
         freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
     ):
         asset_type = self.asset_type
@@ -452,15 +585,15 @@ class DataDumper:
         response = cfreq.get(
             "https://www.bybit.com/x-api/contract/v5/support/funding-rate-list-export",
             params={"symbol": symbol},
-            impersonate="chrome"
+            impersonate="chrome",
         )
-        
+
         response.raise_for_status()
         data = response.json()
 
         if not data.get("ret_code") == 0:
             raise ValueError(f"Error fetching data for {symbol}: {data.get('ret_msg')}")
-                
+
         return data["result"]["downloadUrl"]
 
     async def _download_from_s3_url(self, s3_url: str) -> str:
@@ -470,36 +603,39 @@ class DataDumper:
         # Extract filename from S3 URL if not provided
         parsed_url = urlparse(s3_url)
         local_filename = os.path.basename(parsed_url.path)
-        
+
         async with aiohttp.ClientSession(trust_env=True, proxy=self._proxy) as session:
             async with session.get(s3_url, headers=self._headers) as response:
                 response.raise_for_status()
-                
-                with open(local_filename, 'wb') as f:
+
+                with open(local_filename, "wb") as f:
                     async for chunk in response.content.iter_chunked(self._chunk_size):
                         f.write(chunk)
-        
+
         self._log.debug(f"Downloaded {local_filename}")
 
         # Read the Excel file and convert to parquet
-        df = pd.read_excel(local_filename, header=0, names=['timestamp', 'symbol', 'fundingrate'])
-        
+        df = pd.read_excel(
+            local_filename, header=0, names=["timestamp", "symbol", "fundingrate"]
+        )
+
         # Set proper column types
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-        df['symbol'] = df['symbol'].astype(str)
-        df['fundingrate'] = df['fundingrate'].astype(float)
-        
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df["symbol"] = df["symbol"].astype(str)
+        df["fundingrate"] = df["fundingrate"].astype(float)
+
         # Save as parquet
-        parquet_filename = local_filename.replace('.xlsx', '.parquet')
+        parquet_filename = local_filename.replace(".xlsx", ".parquet")
 
-
-        parquet_filepath = os.path.join(self.save_dir, "funding_rates", parquet_filename)
+        parquet_filepath = os.path.join(
+            self.save_dir, "funding_rates", parquet_filename
+        )
         os.makedirs(os.path.dirname(parquet_filepath), exist_ok=True)
         df.to_parquet(parquet_filepath, index=False)
 
         # Delete the xlsx file
         os.remove(local_filename)
-        
+
         self._log.debug(f"Converted to parquet: {parquet_filename}")
         return parquet_filename
 
@@ -548,13 +684,12 @@ class DataDumper:
         url = self._get_download_url(symbol)
         await self._download_from_s3_url(url)
 
-        
     def _dump_symbol_data(
         self,
         symbol: str,
         data_type: Literal["trades", "klines"],
-        start_date: datetime.date | None = None,
-        end_date: datetime.date | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
     ):
         info = self._info[self.asset_type]
@@ -601,7 +736,6 @@ class DataDumper:
         elif data_type == "fundingrate":
             func = self._async_download_symbol_fundingrate
             params = [(symbol,)]
-            
 
         self._loop.run_until_complete(
             tqdm.gather(
@@ -614,8 +748,8 @@ class DataDumper:
     def dump_symbols(
         self,
         data_type: Literal["trades", "klines", "fundingrate"],
-        start_date: datetime.date | None = None,
-        end_date: datetime.date | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
         freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
     ):
         for symbol in tqdm(self.symbols, desc="Dumping symbols", leave=False):
@@ -631,15 +765,23 @@ class DataDumper:
         #     self._log.error(f"Error dumping {symbol} {data_type}: {e}")
 
 
-def main():
+async def main():
     dumper = DataDumper(
         asset_type="contract",
         quote_currency="USDT",
         symbols=["ADAUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT"],
-        start_date=datetime.date(2025, 1, 1),
+        start_date=datetime(2025, 1, 1),
     )
-    dumper.dump_symbols(data_type="trades")
+
+    df = await dumper._request_klines(
+        symbol="ADAUSDT",
+        freq="1m",
+        start_time=datetime(2025, 1, 1),
+        end_time=datetime(2025, 1, 2),
+    )
+
+    print(df)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

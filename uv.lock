@@ -146,6 +146,7 @@ dependencies = [
     { name = "requests" },
     { name = "retry" },
     { name = "tenacity" },
+    { name = "throttled-py" },
     { name = "tqdm" },
 ]
 
@@ -159,6 +160,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32.3" },
     { name = "retry", specifier = ">=0.9.2" },
     { name = "tenacity", specifier = ">=9.0.0" },
+    { name = "throttled-py", specifier = ">=2.2.3" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 
@@ -996,6 +998,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0a/d4/2b0cd0fe285e14b36db076e78c93766ff1d529d70408bd1d2a5a84f1d929/tenacity-9.1.2.tar.gz", hash = "sha256:1169d376c297e7de388d18b4481760d478b0e99a777cad3a9c86e556f4b697cb", size = 48036, upload-time = "2025-04-02T08:25:09.966Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/30/643397144bfbfec6f6ef821f36f33e57d35946c44a2352d3c9f0ae847619/tenacity-9.1.2-py3-none-any.whl", hash = "sha256:f77bf36710d8b73a50b2dd155c97b870017ad21afe6ab300326b0371b3b05138", size = 28248, upload-time = "2025-04-02T08:25:07.678Z" },
+]
+
+[[package]]
+name = "throttled-py"
+version = "2.2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/84/8d698ade3f573db31a4d8b91de81b674cc313e0a07b5bcc76e49e8e867e9/throttled_py-2.2.3.tar.gz", hash = "sha256:c50c80bb08f109d83ea70c9cf39eb705b5ef4b7e360cb59138ddef04707465ff", size = 42167, upload-time = "2025-08-30T04:07:54.628Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/1b/d9006f4086ccf3b03ee4233f9a5d4720e0155193066627e8ff0e3637491f/throttled_py-2.2.3-py3-none-any.whl", hash = "sha256:cd1ba8da8a48ffe8d551bd7136e21e083a97b8f0ebfcd61fab3475b47c37b589", size = 56849, upload-time = "2025-08-30T04:07:53.307Z" },
 ]
 
 [[package]]
