@@ -375,9 +375,9 @@ class DataDumper:
         category: str,
         symbol: str,
         interval: str,
-        start: int,
-        end: int,
-        limit: int,
+        start: int | None = None,
+        end: int | None = None,
+        limit: int = 1000,
     ):
         url = "https://api.bybit.com/v5/market/kline"
         payload = {
@@ -388,6 +388,7 @@ class DataDumper:
             "end": end,
             "limit": limit,
         }
+        payload = {k: v for k, v in payload.items() if v is not None}
         async with aiohttp.ClientSession(trust_env=True, proxy=self._proxy) as session:
             self._throttle["public"].limit(key="v5/market/kline")
             async with session.get(
@@ -421,54 +422,73 @@ class DataDumper:
         start_time: datetime,
         end_time: datetime,
     ):
-        start_time = int(start_time.timestamp() * 1000)
-        end_time = int(end_time.timestamp() * 1000)
-
+        start_ms = int(start_time.timestamp() * 1000)
+        end_ms = int(end_time.timestamp() * 1000)
         category = self._get_category(symbol)
-        all_klines = []
-        seen_timestamps: set[int] = set()
-        prev_start_time: int | None = None
-
         interval = self._freq_map[freq]
 
-        while True:
-            # Check for infinite loop condition
-            if prev_start_time is not None and prev_start_time == start_time:
-                break
-            prev_start_time = start_time
+        seen: set[int] = set()
+        records: list[list] = []
+        cursor = start_ms
 
-            klines_response = await self._get_v5_market_kline(
+        while cursor < end_ms:
+            resp = await self._get_v5_market_kline(
                 category=category,
                 symbol=symbol,
                 interval=interval,
                 limit=1000,
-                start=start_time,
-                end=end_time,
+                start=cursor,
             )
-
-            # Sort klines by start time and filter out duplicates
-            klines = sorted(
-                klines_response["result"]["list"], key=lambda k: int(k["startTime"])
-            )
-            all_klines.extend(klines)
-            seen_timestamps.update(int(kline["startTime"]) for kline in klines)
-
-            # If no new klines were found, break
-            if not klines:
+            lst = resp.get("result", {}).get("list") or []
+            if not lst:
                 break
 
-            # Update the start_time to fetch the next set of bars
-            start_time = int(klines[-1]["startTime"]) + 1
+            # 排序（升序），去重 + 过滤超出时间范围
+            lst = sorted(lst, key=lambda k: int(k[0]))
+            new_count = 0
+            for k in lst:
+                ts = int(k[0])
+                if ts in seen:
+                    continue
+                if ts < start_ms or ts >= end_ms:
+                    continue
+                seen.add(ts)
+                records.append(k)
+                new_count += 1
 
-            # No more bars to fetch if we've reached the end time
-            if end_time is not None and start_time >= end_time:
+            # 防止死循环：如果没有新增 或 最后一条时间戳未前进则退出
+            last_ts = int(lst[-1][0])
+            if new_count == 0 or last_ts < cursor:
                 break
+
+            cursor = last_ts + 1  # 继续下一个毫秒
+
+        if not records:
+            return pd.DataFrame(
+                columns=[
+                    "symbol",
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "turnover",
+                ]
+            )
 
         df = pd.DataFrame(
-            all_klines,
+            records,
             columns=["startTime", "open", "high", "low", "close", "volume", "turnover"],
         )
         df["symbol"] = symbol
+        df['startTime'] = df['startTime'].astype(int)
+        df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        df['turnover'] = df['turnover'].astype(float)
         df["timestamp"] = pd.to_datetime(df["startTime"], unit="ms", utc=True)
 
         return df[
@@ -482,7 +502,7 @@ class DataDumper:
                 "volume",
                 "turnover",
             ]
-        ]
+        ].sort_values("timestamp")
 
     # @tenacity.retry(
     #     stop=tenacity.stop_after_attempt(5),
@@ -777,7 +797,7 @@ async def main():
         symbol="ADAUSDT",
         freq="1m",
         start_time=datetime(2025, 1, 1),
-        end_time=datetime(2025, 1, 2),
+        end_time=datetime(2025, 1, 11),
     )
 
     print(df)
