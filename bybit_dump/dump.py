@@ -79,11 +79,20 @@ class DataDumper:
     }
 
     @staticmethod
+    def safe_dt(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
     def _get_date_range(
         start_date: datetime,
         end_date: datetime,
         circle: Literal["daily", "monthly"] = "daily",
     ):
+        start_date = DataDumper.safe_dt(start_date)
+        end_date = DataDumper.safe_dt(end_date)
+
         if start_date > end_date:
             raise ValueError("Start date must be before end date")
 
@@ -93,14 +102,18 @@ class DataDumper:
         if circle == "monthly":
             while current <= end_date:
                 # Get the first day of the current month
-                first_day = datetime(current.year, current.month, 1)
+                first_day = datetime(
+                    current.year, current.month, 1, tzinfo=timezone.utc
+                )
                 dates.append(first_day)
 
                 # Move to the first day of next month
                 if current.month == 12:
-                    current = datetime(current.year + 1, 1, 1)
+                    current = datetime(current.year + 1, 1, 1, tzinfo=timezone.utc)
                 else:
-                    current = datetime(current.year, current.month + 1, 1)
+                    current = datetime(
+                        current.year, current.month + 1, 1, tzinfo=timezone.utc
+                    )
         elif circle == "daily":
             while current <= end_date:
                 dates.append(current)
@@ -148,8 +161,8 @@ class DataDumper:
         #     headers=True,
         # )
         # self._headers = haader.generate()
-        start_date = start_date.replace(tzinfo=timezone.utc) if start_date else None
-        end_date = end_date.replace(tzinfo=timezone.utc) if end_date else None
+        start_date = self.safe_dt(start_date) if start_date else None
+        end_date = self.safe_dt(end_date) if end_date else None
 
         now = datetime.now(timezone.utc) - timedelta(days=1)
 
@@ -289,7 +302,7 @@ class DataDumper:
         self,
         symbol: str,
         date: datetime,
-        freq: Literal["1m", "5m", "15m", "30m", "60m"],
+        freq: FREQ_TYPE,
     ):
         if freq not in ["1m", "5m", "15m", "30m", "60m"]:
             raise ValueError(
@@ -337,7 +350,7 @@ class DataDumper:
         data_type: Literal["klines", "trades"],
         date: datetime,
         asset_type: Literal["spot", "contract"] | None = None,
-        freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
+        freq: FREQ_TYPE | None = None,
     ):
         """
         https://public.bybit.com/spot/1INCHUSDT/1INCHUSDT_2025-02-25.csv.gz
@@ -482,13 +495,13 @@ class DataDumper:
             columns=["startTime", "open", "high", "low", "close", "volume", "turnover"],
         )
         df["symbol"] = symbol
-        df['startTime'] = df['startTime'].astype(int)
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df['turnover'] = df['turnover'].astype(float)
+        df["startTime"] = df["startTime"].astype(int)
+        df["open"] = df["open"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["close"] = df["close"].astype(float)
+        df["volume"] = df["volume"].astype(float)
+        df["turnover"] = df["turnover"].astype(float)
         df["timestamp"] = pd.to_datetime(df["startTime"], unit="ms", utc=True)
 
         return df[
@@ -504,6 +517,81 @@ class DataDumper:
             ]
         ].sort_values("timestamp")
 
+    async def _async_download_symbol_kline_data(
+        self,
+        symbol: str,
+        freq: FREQ_TYPE,
+        date: datetime,
+    ):
+        """Download (or refresh current month) kline data for a symbol/frequency/month.
+
+        Spec:
+        - Directory: <save_dir>/klines/<freq>/
+        - Filename: {symbol}_kline_YYYY-MM.parquet
+        - If file does not exist OR the target month has not finished yet (i.e. it's the current ongoing month),
+          fetch fresh data via `_request_klines` for [month_start, next_month_start) and overwrite.
+        - Otherwise (file exists and month is complete), skip download.
+
+        Assumptions:
+        - User spec mentioned `self.download_dir`; repo uses `self.save_dir`, so we use `self.save_dir`.
+        - `date` can be any datetime within the target month (naive or tz-aware). We normalize to UTC month boundaries.
+        """
+        if freq is None:
+            raise ValueError("`freq` must be provided for klines")
+        
+        if freq not in self._freq_map:
+            raise ValueError(f"freq {freq} not supported, must be one of {list(self._freq_map.keys())}")
+
+        # Normalize to UTC month start
+        date = self.safe_dt(date)
+
+        month_start = datetime(date.year, date.month, 1, tzinfo=timezone.utc)
+        # Compute first day of next month
+        if date.month == 12:
+            next_month_start = datetime(date.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            next_month_start = datetime(
+                date.year, date.month + 1, 1, tzinfo=timezone.utc
+            )
+
+        # Build storage paths
+        dir_path = os.path.join(self.save_dir, "klines", freq)
+        os.makedirs(dir_path, exist_ok=True)
+        file_name = f"{symbol}_kline_{month_start.strftime('%Y-%m')}.parquet"
+        file_path = os.path.join(dir_path, file_name)
+
+        # Determine whether month is finished (i.e., we are past next month's start)
+        now_utc = datetime.now(timezone.utc)
+        month_finished = now_utc >= next_month_start
+
+        # If file exists and month already finished, we assume it's complete and skip re-download
+        if os.path.exists(file_path) and month_finished:
+            self._log.debug(
+                f"Skip kline download: {file_name} exists and month completed"
+            )
+            return file_path
+
+        # Fetch klines for the whole month range
+        try:
+            df = await self._request_klines(
+                symbol=symbol,
+                freq=freq,
+                start_time=month_start,
+                end_time=next_month_start,
+            )
+        except Exception as e:
+            self._log.error(
+                f"Failed to fetch klines for {symbol} {freq} {month_start.strftime('%Y-%m')}: {e}"
+            )
+            return None
+
+        df.to_parquet(file_path, index=False)
+        self._log.debug(
+            f"Saved kline data {symbol} {freq} {month_start.strftime('%Y-%m')} -> {file_path} (rows={len(df)})"
+        )
+
+        return file_path
+
     # @tenacity.retry(
     #     stop=tenacity.stop_after_attempt(5),
     #     wait=tenacity.wait_exponential(exp_base=2, multiplier=4, max=64),
@@ -513,7 +601,7 @@ class DataDumper:
         symbol: str,
         data_type: Literal["klines", "trades", "fundingrate"],
         date: datetime,
-        freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
+        freq: FREQ_TYPE | None = None,
     ):
         asset_type = self.asset_type
 
@@ -710,8 +798,11 @@ class DataDumper:
         data_type: Literal["trades", "klines"],
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
+        freq: FREQ_TYPE | None = None,
     ):
+        start_date = self.safe_dt(start_date) if start_date else None
+        end_date = self.safe_dt(end_date) if end_date else None
+
         info = self._info[self.asset_type]
         if symbol not in info:
             raise ValueError(f"symbol {symbol} not found in {self.asset_type}")
@@ -748,8 +839,8 @@ class DataDumper:
             )
 
         if data_type == "klines":
-            func = self._async_download_symbol_data
-            params = [(symbol, data_type, date, freq) for date in date_list]
+            func = self._async_download_symbol_kline_data
+            params = [(symbol, freq, date) for date in date_list]
         elif data_type == "trades":
             func = self._async_download_symbol_data
             params = [(symbol, data_type, date) for date in date_list]
@@ -770,7 +861,7 @@ class DataDumper:
         data_type: Literal["trades", "klines", "fundingrate"],
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        freq: Literal["1m", "5m", "15m", "30m", "60m"] | None = None,
+        freq: FREQ_TYPE | None = None,
     ):
         for symbol in tqdm(self.symbols, desc="Dumping symbols", leave=False):
             # try:
